@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Environmental Data Map</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+    <style>
+        #map { height: 100vh; width: 100%; }
+        body { padding: 0; margin: 0; font-family: sans-serif; }
+        .leaflet-popup-content-wrapper { border-radius: 8px; }
+        .leaflet-popup-content { font-size: 14px; line-height: 1.6; }
+        .leaflet-popup-content b { color: #333; }
+        .loading { font-style: italic; color: #888; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+
+    <script>
+        // --- 1. SETUP ---
+        const API_KEY = '1ce280acedf4438afe09d9096ca473d0'; // <-- PASTE YOUR KEY HERE
+        const map = L.map('map').setView([20, 0], 3); // Centered globally
+        let earthquakes = [];
+
+        // Add the OpenStreetMap tile layer
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+            attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'
+        }).addTo(map);
+
+        // --- 2. FETCH EARTHQUAKE DATA ON LOAD ---
+        // Fetches all significant earthquakes from the past 7 days from the USGS
+        fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/significant_week.geojson')
+            .then(response => response.json())
+            .then(data => {
+                earthquakes = data.features;
+                console.log("Earthquake data loaded.");
+            })
+            .catch(error => console.error("Error fetching earthquake data:", error));
+            
+        // --- 3. HELPER FUNCTION TO FIND NEAREST EARTHQUAKE ---
+        function findNearestEarthquake(lat, lon) {
+            if (earthquakes.length === 0) return null;
+            let nearestQuake = null;
+            let minDistance = Infinity;
+
+            earthquakes.forEach(quake => {
+                const [quakeLon, quakeLat] = quake.geometry.coordinates;
+                const distance = Math.sqrt(Math.pow(lon - quakeLon, 2) + Math.pow(lat - quakeLat, 2));
+                if (distance < minDistance) {
+                    minDistance = distance;
+                    nearestQuake = quake;
+                }
+            });
+            return nearestQuake;
+        }
+        
+        // --- 4. HANDLE MAP CLICKS ---
+        map.on('click', function(e) {
+            const lat = e.latlng.lat;
+            const lon = e.latlng.lng;
+
+            // Create a popup and show a loading message
+            const popup = L.popup()
+                .setLatLng([lat, lon])
+                .setContent('<p class="loading">Fetching data...</p>')
+                .openOn(map);
+
+            // Fetch Weather and AQI data
+            const weatherUrl = `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&units=metric&appid=${API_KEY}`;
+            const aqiUrl = `https://api.openweathermap.org/data/2.5/air_pollution?lat=${lat}&lon=${lon}&appid=${API_KEY}`;
+            
+            Promise.all([fetch(weatherUrl), fetch(aqiUrl)])
+                .then(responses => Promise.all(responses.map(res => res.json())))
+                .then(([weatherData, aqiData]) => {
+                    // Process API data
+                    const temp = weatherData.main.temp;
+                    const aqi = aqiData.list[0].main.aqi; // 1 = Good, 5 = Very Poor
+                    const aqiLabels = ['Good', 'Fair', 'Moderate', 'Poor', 'Very Poor'];
+
+                    // Find the nearest earthquake
+                    const nearestQuake = findNearestEarthquake(lat, lon);
+                    let quakeInfo = 'No significant recent earthquakes nearby.';
+                    if (nearestQuake) {
+                        const mag = nearestQuake.properties.mag.toFixed(1);
+                        const place = nearestQuake.properties.place;
+                        const tsunami = nearestQuake.properties.tsunami === 1 ? 'Yes' : 'No';
+                        quakeInfo = `<b>Magnitude:</b> ${mag} Richter<br>
+                                     <b>Location:</b> ${place}<br>
+                                     <b>Tsunami Warning:</b> ${tsunami}`;
+                    }
+
+                    // Format the final content for the popup
+                    const popupContent = `
+                        <h4>Environmental Data</h4>
+                        <b>Temperature:</b> ${temp.toFixed(1)} °C<br>
+                        <b>Air Quality (AQI):</b> ${aqi} (${aqiLabels[aqi - 1]})<br>
+                        <hr>
+                        <h4>Nearest Seismic Event</h4>
+                        ${quakeInfo}
+                    `;
+                    
+                    // Update the popup with the fetched data
+                    popup.setContent(popupContent);
+                })
+                .catch(error => {
+                    console.error("Error fetching data:", error);
+                    popup.setContent('<p style="color:red;">Could not fetch data for this location.</p>');
+                });
+        });
+
+    </script>
+</body>
+</html>
