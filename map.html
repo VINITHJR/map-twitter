@@ -8,10 +8,16 @@
     <style>
         #map { height: 100vh; width: 100%; }
         body { padding: 0; margin: 0; font-family: sans-serif; }
-        .leaflet-popup-content-wrapper { border-radius: 8px; }
+        .leaflet-popup-content-wrapper { border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.15); }
         .leaflet-popup-content { font-size: 14px; line-height: 1.6; }
-        .leaflet-popup-content b { color: #333; }
+        .leaflet-popup-content h4 { margin-top: 0; margin-bottom: 5px; /* Reduced margin */ color: #007bff; }
+        .leaflet-popup-content hr { margin: 12px 0; border: 0; border-top: 1px solid #eee; }
         .loading { font-style: italic; color: #888; }
+        .warning-red { color: #d90429; font-weight: bold; }
+        .warning-orange { color: #f77f00; font-weight: bold; }
+        
+        /* Style for the new date */
+        .popup-date { font-size: 0.9em; color: #555; margin-bottom: 10px; display: block; }
     </style>
 </head>
 <body>
@@ -19,18 +25,16 @@
 
     <script>
         // --- 1. SETUP ---
-        const API_KEY = '1ce280acedf4438afe09d9096ca473d0'; // <-- PASTE YOUR KEY HERE
+        const API_KEY = '1ce280acedf4438afe09d9096ca473d0'; // Your key
         const map = L.map('map').setView([20, 0], 3); // Centered globally
         let earthquakes = [];
 
-        // Add the OpenStreetMap tile layer
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             maxZoom: 19,
             attribution: '&copy; <a href="http://www.openstreetmap.org/copyright">OpenStreetMap</a>'
         }).addTo(map);
 
         // --- 2. FETCH EARTHQUAKE DATA ON LOAD ---
-        // Fetches all significant earthquakes from the past 7 days from the USGS
         fetch('https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/significant_week.geojson')
             .then(response => response.json())
             .then(data => {
@@ -39,7 +43,7 @@
             })
             .catch(error => console.error("Error fetching earthquake data:", error));
             
-        // --- 3. HELPER FUNCTION TO FIND NEAREST EARTHQUAKE ---
+        // --- 3. HELPER FUNCTIONS ---
         function findNearestEarthquake(lat, lon) {
             if (earthquakes.length === 0) return null;
             let nearestQuake = null;
@@ -55,61 +59,119 @@
             });
             return nearestQuake;
         }
+
+        // Updated AQI ranges to match your request
+        function getAqiInfo(pm2_5) {
+            if (pm2_5 <= 50) return { text: "Good", color: "#008000" };
+            if (pm2_5 <= 100) return { text: "Moderate", color: "#f7b500" };
+            if (pm2_5 <= 150) return { text: "Unhealthy (Sensitive)", color: "#f77f00" };
+            if (pm2_5 <= 200) return { text: "Unhealthy", color: "#d90429" };
+            if (pm2_5 <= 300) return { text: "Very Unhealthy", color: "#8f2d56" };
+            return { text: "Hazardous", color: "#590d22" };
+        }
         
         // --- 4. HANDLE MAP CLICKS ---
         map.on('click', function(e) {
             const lat = e.latlng.lat;
             const lon = e.latlng.lng;
 
-            // Create a popup and show a loading message
             const popup = L.popup()
                 .setLatLng([lat, lon])
                 .setContent('<p class="loading">Fetching data...</p>')
                 .openOn(map);
 
-            // Fetch Weather and AQI data
             const weatherUrl = `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&units=metric&appid=${API_KEY}`;
             const aqiUrl = `https://api.openweathermap.org/data/2.5/air_pollution?lat=${lat}&lon=${lon}&appid=${API_KEY}`;
+            const reverseGeoUrl = `https://api.openweathermap.org/geo/1.0/reverse?lat=${lat}&lon=${lon}&limit=1&appid=${API_KEY}`;
             
-            Promise.all([fetch(weatherUrl), fetch(aqiUrl)])
-                .then(responses => Promise.all(responses.map(res => res.json())))
-                .then(([weatherData, aqiData]) => {
-                    // Process API data
-                    const temp = weatherData.main.temp;
-                    const aqi = aqiData.list[0].main.aqi; // 1 = Good, 5 = Very Poor
-                    const aqiLabels = ['Good', 'Fair', 'Moderate', 'Poor', 'Very Poor'];
+            Promise.allSettled([
+                fetch(weatherUrl).then(res => res.json()),
+                fetch(aqiUrl).then(res => res.json()),
+                fetch(reverseGeoUrl).then(res => res.json())
+            ])
+            .then(([weatherResult, aqiResult, geoResult]) => {
+                
+                // --- 1. Process Place Name ---
+                let placeName = "Clicked Location";
+                if (geoResult.status === 'fulfilled' && geoResult.value.length > 0) {
+                    placeName = `${geoResult.value[0].name}, ${geoResult.value[0].country}`;
+                } else {
+                    console.warn("Reverse geocoding failed:", geoResult.reason);
+                }
 
-                    // Find the nearest earthquake
-                    const nearestQuake = findNearestEarthquake(lat, lon);
-                    let quakeInfo = 'No significant recent earthquakes nearby.';
-                    if (nearestQuake) {
-                        const mag = nearestQuake.properties.mag.toFixed(1);
-                        const place = nearestQuake.properties.place;
-                        const tsunami = nearestQuake.properties.tsunami === 1 ? 'Yes' : 'No';
-                        quakeInfo = `<b>Magnitude:</b> ${mag} Richter<br>
-                                     <b>Location:</b> ${place}<br>
-                                     <b>Tsunami Warning:</b> ${tsunami}`;
+                // --- 2. Process Weather & Cyclone Data ---
+                let temp = "N/A";
+                let weatherInfo = "N/A";
+                let cycloneWarning = "None"; 
+
+                if (weatherResult.status === 'fulfilled' && weatherResult.value.main) {
+                    temp = weatherResult.value.main.temp.toFixed(1);
+                    const weatherId = weatherResult.value.weather[0].id;
+                    const weatherDesc = weatherResult.value.weather[0].description;
+                    weatherInfo = weatherResult.value.weather[0].main;
+
+                    if (weatherId === 902 || weatherId === 962) { // Hurricane (Cyclone)
+                        cycloneWarning = `<span class="warning-red">${weatherDesc}</span>`;
+                    } else if (weatherId === 901 || weatherId === 961) { // Tropical Storm
+                        cycloneWarning = `<span class="warning-orange">${weatherDesc}</span>`;
+                    } else if (weatherId === 781 || weatherId === 900) { // Tornado
+                        cycloneWarning = `<span class="warning-red">${weatherDesc}</span>`;
                     }
+                } else {
+                    console.warn("Weather data failed:", weatherResult.reason);
+                }
 
-                    // Format the final content for the popup
-                    const popupContent = `
-                        <h4>Environmental Data</h4>
-                        <b>Temperature:</b> ${temp.toFixed(1)} °C<br>
-                        <b>Air Quality (AQI):</b> ${aqi} (${aqiLabels[aqi - 1]})<br>
-                        <hr>
-                        <h4>Nearest Seismic Event</h4>
-                        ${quakeInfo}
-                    `;
+                // --- 3. Process AQI Data ---
+                let aqiValue = "N/A";
+                let aqiStatus = { text: "N/A", color: "#333" };
+                if (aqiResult.status === 'fulfilled' && aqiResult.value.list) {
+                    const pm2_5 = aqiResult.value.list[0].components.pm2_5;
+                    aqiValue = pm2_5.toFixed(2);
+                    aqiStatus = getAqiInfo(pm2_5);
+                } else {
+                    console.warn("AQI data failed:", aqiResult.reason);
+                }
+
+                // --- 4. Process Earthquake Data ---
+                const nearestQuake = findNearestEarthquake(lat, lon);
+                let quakeInfo = '<b>Nearest Seismic Event:</b><br>No significant recent earthquakes nearby.';
+                
+                if (nearestQuake) {
+                    const mag = nearestQuake.properties.mag.toFixed(1);
+                    const place = nearestQuake.properties.place;
+                    const tsunami = nearestQuake.properties.tsu === 1 ? 'Yes' : 'No';
+                    quakeInfo = `<b>Nearest Seismic Event:</b><br>
+                                 <b>Magnitude:</b> ${mag} Richter<br>
+                                 <b>Location:</b> ${place}<br>
+                                 <b>Tsunami Warning:</b> ${tsunami}`;
+                }
+                
+                // --- 5. Get Current Date ---
+                const dateOptions = { year: 'numeric', month: 'long', day: 'numeric' };
+                const currentDate = new Date().toLocaleDateString('en-US', dateOptions);
+
+                // --- 6. Format the final content for the popup ---
+                const popupContent = `
+                    <h4>${placeName}</h4>
+                    <span class="popup-date">${currentDate}</span> <b>Temperature:</b> ${temp} °C<br>
+                    <b>Air Quality (PM2.5):</b> ${aqiValue} µg/m³<br>
+                    <b style="color:${aqiStatus.color};">Status:</b> <span style="color:${aqiStatus.color}; font-weight:bold;">${aqiStatus.text}</span>
                     
-                    // Update the popup with the fetched data
-                    popup.setContent(popupContent);
-                })
-                .catch(error => {
-                    console.error("Error fetching data:", error);
-                    popup.setContent('<p style="color:red;">Could not fetch data for this location.</p>');
-                });
+                    <hr>
+                    <h4>Alerts</h4>
+                    <b>Weather:</b> ${weatherInfo}<br>
+                    <b>Cyclone Warning:</b> ${cycloneWarning}<br> 
+                    <br>
+                    ${quakeInfo}
+                `;
+                
+                popup.setContent(popupContent);
+            })
+            .catch(error => {
+                console.error("Critical error in fetch chain:", error);
+                popup.setContent('<p style="color:red;">A critical error occurred.</p>');
+            });
         });
-
     </script>
 </body>
 </html>
