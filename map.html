@@ -10,22 +10,81 @@
         body { padding: 0; margin: 0; font-family: sans-serif; }
         .leaflet-popup-content-wrapper { border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.15); }
         .leaflet-popup-content { font-size: 14px; line-height: 1.6; }
-        .leaflet-popup-content h4 { margin-top: 0; margin-bottom: 5px; /* Reduced margin */ color: #007bff; }
+        .leaflet-popup-content h4 { margin-top: 0; margin-bottom: 5px; color: #007bff; }
         .leaflet-popup-content hr { margin: 12px 0; border: 0; border-top: 1px solid #eee; }
         .loading { font-style: italic; color: #888; }
         .warning-red { color: #d90429; font-weight: bold; }
         .warning-orange { color: #f77f00; font-weight: bold; }
-        
-        /* Style for the new date */
         .popup-date { font-size: 0.9em; color: #555; margin-bottom: 10px; display: block; }
+
+        /* Search bar styles */
+        .search-wrap {
+            position: absolute;
+            top: 10px; left: 50%;
+            transform: translateX(-50%);
+            z-index: 1000;
+            display: flex;
+            gap: 8px;
+            width: min(800px, 90vw);
+        }
+        .search-input {
+            flex: 1;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid #ccc;
+            outline: none;
+            font-size: 14px;
+            background: #fff;
+        }
+        .search-btn {
+            padding: 10px 14px;
+            border-radius: 8px;
+            border: none;
+            background: #007bff;
+            color: #fff;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .search-results {
+            position: absolute;
+            top: 46px; /* below input */
+            left: 0;
+            right: 90px; /* leave space for button */
+            background: #fff;
+            border: 1px solid #e5e5e5;
+            border-radius: 8px;
+            z-index: 1001;
+            max-height: 240px;
+            overflow: auto;
+            box-shadow: 0 6px 20px rgba(0,0,0,0.12);
+        }
+        .search-item {
+            padding: 10px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid #f1f1f1;
+            font-size: 14px;
+        }
+        .search-item:last-child { border-bottom: none; }
+        .search-item:hover { background: #f7f9fc; }
+        @media (max-width: 480px) {
+            .search-btn { padding: 10px 10px; }
+            .search-results { right: 80px; }
+        }
     </style>
 </head>
 <body>
+    <!-- Top search bar -->
+    <div class="search-wrap">
+        <input id="place-input" class="search-input" type="text" placeholder="Search a place (e.g., Bengaluru, India)" />
+        <button id="place-btn" class="search-btn" type="button">Search</button>
+        <div id="results" class="search-results" style="display:none;"></div>
+    </div>
+
     <div id="map"></div>
 
     <script>
         // --- 1. SETUP ---
-        const API_KEY = '1ce280acedf4438afe09d9096ca473d0'; // Your key
+        const API_KEY = '1ce280acedf4438afe09d9096ca473d0'; // used ONLY for reverse geocoding (OpenWeather)
         const map = L.map('map').setView([20, 0], 3); // Centered globally
         let earthquakes = [];
 
@@ -60,7 +119,7 @@
             return nearestQuake;
         }
 
-        // Updated AQI ranges to match your request
+        // AQI bucket text + color
         function getAqiInfo(pm2_5) {
             if (pm2_5 <= 50) return { text: "Good", color: "#008000" };
             if (pm2_5 <= 100) return { text: "Moderate", color: "#f7b500" };
@@ -69,19 +128,19 @@
             if (pm2_5 <= 300) return { text: "Very Unhealthy", color: "#8f2d56" };
             return { text: "Hazardous", color: "#590d22" };
         }
-        
-        // --- 4. HANDLE MAP CLICKS ---
-        map.on('click', function(e) {
-            const lat = e.latlng.lat;
-            const lon = e.latlng.lng;
 
+        // Reusable: fetch + show popup at coords
+        function showPopupAt(lat, lon) {
             const popup = L.popup()
                 .setLatLng([lat, lon])
                 .setContent('<p class="loading">Fetching data...</p>')
                 .openOn(map);
 
-            const weatherUrl = `https://api.openweathermap.org/data/2.5/weather?lat=${lat}&lon=${lon}&units=metric&appid=${API_KEY}`;
-            const aqiUrl = `https://api.openweathermap.org/data/2.5/air_pollution?lat=${lat}&lon=${lon}&appid=${API_KEY}`;
+            // Open-Meteo (no key)
+            const weatherUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}&current_weather=true&timezone=auto`;
+            const aqiUrl = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${lat}&longitude=${lon}&hourly=pm2_5&timezone=auto`;
+
+            // Reverse geocoding (OpenWeather)
             const reverseGeoUrl = `https://api.openweathermap.org/geo/1.0/reverse?lat=${lat}&lon=${lon}&limit=1&appid=${API_KEY}`;
             
             Promise.allSettled([
@@ -90,52 +149,53 @@
                 fetch(reverseGeoUrl).then(res => res.json())
             ])
             .then(([weatherResult, aqiResult, geoResult]) => {
-                
-                // --- 1. Process Place Name ---
+                // 1) Place name
                 let placeName = "Clicked Location";
-                if (geoResult.status === 'fulfilled' && geoResult.value.length > 0) {
+                if (geoResult.status === 'fulfilled' && Array.isArray(geoResult.value) && geoResult.value.length > 0) {
                     placeName = `${geoResult.value[0].name}, ${geoResult.value[0].country}`;
                 } else {
                     console.warn("Reverse geocoding failed:", geoResult.reason);
                 }
 
-                // --- 2. Process Weather & Cyclone Data ---
+                // 2) Weather (Open-Meteo)
                 let temp = "N/A";
                 let weatherInfo = "N/A";
                 let cycloneWarning = "None"; 
 
-                if (weatherResult.status === 'fulfilled' && weatherResult.value.main) {
-                    temp = weatherResult.value.main.temp.toFixed(1);
-                    const weatherId = weatherResult.value.weather[0].id;
-                    const weatherDesc = weatherResult.value.weather[0].description;
-                    weatherInfo = weatherResult.value.weather[0].main;
+                if (weatherResult.status === 'fulfilled' && weatherResult.value.current_weather) {
+                    temp = Number(weatherResult.value.current_weather.temperature).toFixed(1);
+                    weatherInfo = "Current Weather";
+                    const weatherCode = weatherResult.value.current_weather.weathercode;
 
-                    if (weatherId === 902 || weatherId === 962) { // Hurricane (Cyclone)
-                        cycloneWarning = `<span class="warning-red">${weatherDesc}</span>`;
-                    } else if (weatherId === 901 || weatherId === 961) { // Tropical Storm
-                        cycloneWarning = `<span class="warning-orange">${weatherDesc}</span>`;
-                    } else if (weatherId === 781 || weatherId === 900) { // Tornado
-                        cycloneWarning = `<span class="warning-red">${weatherDesc}</span>`;
+                    if ([99].includes(weatherCode)) {
+                        cycloneWarning = `<span class="warning-red">Severe Thunderstorm / Cyclone</span>`;
+                    } else if ([95, 96, 97].includes(weatherCode)) {
+                        cycloneWarning = `<span class="warning-orange">Strong Storm Detected</span>`;
                     }
                 } else {
                     console.warn("Weather data failed:", weatherResult.reason);
                 }
 
-                // --- 3. Process AQI Data ---
+                // 3) AQI (Open-Meteo)
                 let aqiValue = "N/A";
                 let aqiStatus = { text: "N/A", color: "#333" };
-                if (aqiResult.status === 'fulfilled' && aqiResult.value.list) {
-                    const pm2_5 = aqiResult.value.list[0].components.pm2_5;
-                    aqiValue = pm2_5.toFixed(2);
+                if (
+                    aqiResult.status === 'fulfilled' && 
+                    aqiResult.value.hourly && 
+                    Array.isArray(aqiResult.value.hourly.pm2_5) && 
+                    aqiResult.value.hourly.pm2_5.length > 0
+                ) {
+                    const pm25Array = aqiResult.value.hourly.pm2_5;
+                    const pm2_5 = pm25Array[pm25Array.length - 1];
+                    aqiValue = Number(pm2_5).toFixed(2);
                     aqiStatus = getAqiInfo(pm2_5);
                 } else {
                     console.warn("AQI data failed:", aqiResult.reason);
                 }
 
-                // --- 4. Process Earthquake Data ---
+                // 4) Earthquakes
                 const nearestQuake = findNearestEarthquake(lat, lon);
                 let quakeInfo = '<b>Nearest Seismic Event:</b><br>No significant recent earthquakes nearby.';
-                
                 if (nearestQuake) {
                     const mag = nearestQuake.properties.mag.toFixed(1);
                     const place = nearestQuake.properties.place;
@@ -146,14 +206,16 @@
                                  <b>Tsunami Warning:</b> ${tsunami}`;
                 }
                 
-                // --- 5. Get Current Date ---
+                // 5) Date + Time
+                const now = new Date();
                 const dateOptions = { year: 'numeric', month: 'long', day: 'numeric' };
-                const currentDate = new Date().toLocaleDateString('en-US', dateOptions);
+                const currentDate = now.toLocaleDateString('en-US', dateOptions);
+                const currentTime = now.toLocaleTimeString('en-US', { hour: "2-digit", minute: "2-digit", second:"2-digit" });
 
-                // --- 6. Format the final content for the popup ---
+                // 6) Popup content
                 const popupContent = `
                     <h4>${placeName}</h4>
-                    <span class="popup-date">${currentDate}</span> <b>Temperature:</b> ${temp} °C<br>
+                    <span class="popup-date">${currentDate} | ${currentTime}</span> <b>Temperature:</b> ${temp} °C<br>
                     <b>Air Quality (PM2.5):</b> ${aqiValue} µg/m³<br>
                     <b style="color:${aqiStatus.color};">Status:</b> <span style="color:${aqiStatus.color}; font-weight:bold;">${aqiStatus.text}</span>
                     
@@ -169,8 +231,74 @@
             })
             .catch(error => {
                 console.error("Critical error in fetch chain:", error);
-                popup.setContent('<p style="color:red;">A critical error occurred.</p>');
+                L.popup().setLatLng([lat, lon]).setContent('<p style="color:red;">A critical error occurred.</p>').openOn(map);
             });
+        }
+
+        // --- 4. MAP CLICK -> reuse the function ---
+        map.on('click', function(e) {
+            const lat = e.latlng.lat;
+            const lon = e.latlng.lng;
+            showPopupAt(lat, lon);
+        });
+
+        // --- 5. SEARCH BAR LOGIC (Nominatim) ---
+        const input = document.getElementById('place-input');
+        const button = document.getElementById('place-btn');
+        const resultsBox = document.getElementById('results');
+
+        function clearResults() {
+            resultsBox.innerHTML = '';
+            resultsBox.style.display = 'none';
+        }
+
+        function renderResults(items) {
+            if (!items || items.length === 0) {
+                resultsBox.innerHTML = '<div class="search-item">No results.</div>';
+                resultsBox.style.display = 'block';
+                return;
+            }
+            resultsBox.innerHTML = '';
+            items.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'search-item';
+                div.textContent = item.display_name;
+                div.addEventListener('click', () => {
+                    clearResults();
+                    const lat = parseFloat(item.lat);
+                    const lon = parseFloat(item.lon);
+                    map.setView([lat, lon], 10);
+                    showPopupAt(lat, lon);
+                });
+                resultsBox.appendChild(div);
+            });
+            resultsBox.style.display = 'block';
+        }
+
+        async function doSearch() {
+            const q = input.value.trim();
+            clearResults();
+            if (!q) return;
+            try {
+                const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(q)}&limit=5&addressdetails=1`;
+                const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+                const data = await res.json();
+                renderResults(data);
+            } catch (err) {
+                console.error('Search error:', err);
+                resultsBox.innerHTML = '<div class="search-item">Error searching. Try again.</div>';
+                resultsBox.style.display = 'block';
+            }
+        }
+
+        button.addEventListener('click', doSearch);
+        input.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter') doSearch();
+            if (e.key === 'Escape') clearResults();
+        });
+        document.addEventListener('click', (e) => {
+            // close results when clicking outside
+            if (!e.target.closest('.search-wrap')) clearResults();
         });
     </script>
 </body>
